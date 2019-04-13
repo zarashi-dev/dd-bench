@@ -1,0 +1,109 @@
+#!/usr/bin/env zsh
+# dd-bench
+# Find out the fastest blocksize for dd command
+set -eo pipefail
+local version="0.0.1"
+
+# Help text
+function print_help {
+  cat <<'EOHELP'
+Usage: dd-bench [OPTIONS]
+Find out the fastest blocksize for dd command
+
+Options:
+  --try Set the number of bench to be averaged (defaults to 3)
+  --help | -h Show this help text
+  --version Show version information
+
+Environments:
+  DD_BENCH_BLOCKSIZE Array of blocksize to be tested 
+  DD_BENCH_FILE File to dd
+EOHELP
+}
+
+# Parse options
+local -A opthash
+local trial_count 
+zparseopts -D -A opthash h -help -version -try:
+
+if [[ ${#@} > 0 ]]; then
+  echo "illigal options"
+  print_help
+  exit 1
+fi
+
+if [[ "${+opthash[--version]}" == 1 ]]; then
+  echo "${0##*/} ${version}"
+  exit 0
+fi
+
+if [[ "${+opthash[-h]}" == 1 || "${+opthash[--help]}" == 1 ]]; then
+  print_help
+  exit 0
+fi
+
+if [[ "${+opthash[--try]}" ==  1 ]]; then
+  trial_count=${(v)opthash[--try]}
+else
+  trial_count=3 # default
+fi
+
+# Create a list of blocksizes to be tested
+local -a bs_list
+if [[ ${+DD_BENCH_BLOCKSIZE} ]]; then
+  ## Adding 64k..512k
+  for i in {6..9}; do
+    bs_list+=($(( 2 ** ${i} ))k)
+  done
+  ## Adding 1m..512m
+  for i in {1..9}; do
+    bs_list+=($(( 2 ** ${i} ))m)
+  done
+else
+  bs_list=${DD_BENCH_BLOCKSIZE}
+fi
+
+# Set infile & outfile
+local infile
+if [[ ${+DD_BENCH_FILE} == 1 ]]; then
+  if [[ -a ${DD_BENCH_FILE} ]]; then
+    infile=${DD_BENCH_FILE}
+  else
+    echo "DD_BENCH_FILE do not exists. Aborting..."
+    exit 1
+  fi
+else
+  # Create 1GB random file used for the benchmark
+  infile="$(mktemp -t dd-bench_infile)"
+  printf "Creating test file..."
+  dd if=/dev/urandom of=${infile} count=1024000 1>/dev/null 2>&1 && printf " completed"
+  echo
+fi
+local outfile="$(mktemp -t dd-bench_outfile)"
+
+# Run speedtest
+echo "Speedtesting for blocksizes: ${(@)bs_list}"
+local -A results
+for bs in ${bs_list}; do
+  local -a trial_results=()
+  for i in {1..${trial_count}}; do
+    local this_result=("$(dd if=${infile} of=${outfile} bs=${bs} 2>&1 | awk 'NR == 3{print $5}')")
+    printf -v this_result "%.3f" ${this_result}
+    trial_results+=($this_result)
+  done
+  local ave_result=$(( (${(j:+:)trial_results}) / ${#trial_results} ))
+  printf -v ave_result "%.3f" ${ave_result}
+  printf "=> %s executed in ave. %.3f sec (%s)\n" ${bs} ${ave_result} ${(j:, :)trial_results}
+  results+=(${bs} ${ave_result})
+done
+
+# Print the fastest result
+echo
+local fastest=${${(@vn)results}[1]}
+echo "${(k)results[(eR)$fastest]} was the fastest option, executed in ${fastest} seconds"
+
+# Remove files
+if [[ ! ${+DD_BENCH_FILE} == 1 ]]; then
+  rm ${infile}
+fi
+rm ${outfile}
